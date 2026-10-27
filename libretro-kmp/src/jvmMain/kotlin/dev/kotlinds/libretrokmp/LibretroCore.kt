@@ -1,9 +1,11 @@
 package dev.kotlinds.libretrokmp
 
 import com.sun.jna.CallbackReference
+import com.sun.jna.Function
 import com.sun.jna.Library
 import com.sun.jna.Memory
 import com.sun.jna.Native
+import com.sun.jna.NativeLibrary
 import com.sun.jna.Platform
 import com.sun.jna.Pointer
 import java.io.File
@@ -11,7 +13,8 @@ import java.io.File
 /**
  * JVM implementation: the core is loaded with JNA and its callbacks are JNA callbacks.
  */
-actual class LibretroCore actual constructor(corePath: String, private val frontend: LibretroFrontend) : AutoCloseable {
+actual class LibretroCore actual constructor(private val corePath: String, private val frontend: LibretroFrontend) :
+    AutoCloseable, BufferedSerialization, BufferedMemory, CoreDirtyPages, CoreLink {
 
     private val lib: LibretroLib = Native.load(corePath, LibretroLib::class.java, loadOptions(Platform.getOSType()))
     private val environment = Environment(frontend)
@@ -97,6 +100,95 @@ actual class LibretroCore actual constructor(corePath: String, private val front
         return pointer.getByteArray(0, size.toInt())
     }
 
+    override fun readMemoryInto(type: MemoryType, into: ByteArray): Int {
+        val size = lib.retro_get_memory_size(type.id)
+        if (size <= 0) return 0
+        val pointer = lib.retro_get_memory_data(type.id) ?: return 0
+        val length = minOf(size, into.size.toLong()).toInt()
+        pointer.read(0, into, 0, length)
+        return length
+    }
+
+    // The dirty-page symbol is optional: a stock core does not export it, so the lookup is lazy and
+    // failures mean "no support".
+    private val nativeLibrary: NativeLibrary? = runCatching { NativeLibrary.getInstance(corePath) }.getOrNull()
+    private val dirtyPagesFunction: Function? = runCatching {
+        nativeLibrary?.getFunction("t6_rollback_dirty_pages")
+    }.getOrNull()
+    private var dirtyPagesBuffer: Memory? = null
+
+    override fun dirtyPages(out: ByteArray): Int {
+        val function = dirtyPagesFunction ?: return 0
+        if (out.isEmpty()) return 0
+        val memory = dirtyPagesBuffer?.takeIf { it.size() >= out.size }
+            ?: Memory(out.size.toLong()).also { dirtyPagesBuffer = it }
+        val pages = function.invokeInt(arrayOf(memory, out.size))
+        if (pages <= 0) return 0
+        val count = minOf(pages, out.size)
+        memory.read(0, out, 0, count)
+        return count
+    }
+
+    // The link ABI is optional as well: a stock core keeps its own LAN transport.
+    private val linkFunction: Function? = runCatching {
+        nativeLibrary?.getFunction("t6_link_set_callbacks")
+    }.getOrNull()
+    private val linkSendBuffer = ByteArray(2048)
+    private val linkRecvBuffer = ByteArray(2048)
+    private var linkChannel: LinkChannel? = null
+    private var linkSendCallback: LinkSendCallback? = null
+    private var linkRecvCallback: LinkRecvCallback? = null
+
+    override fun installLink(channel: LinkChannel): Boolean {
+        val function = linkFunction ?: return false
+        linkChannel = channel
+        val send = LinkSendCallback { data, length ->
+            val current = linkChannel
+            if (current == null || length <= 0 || length > linkSendBuffer.size) {
+                0
+            } else {
+                data.read(0, linkSendBuffer, 0, length)
+                current.onLinkSend(linkSendBuffer, length)
+            }
+        }
+        val recv = LinkRecvCallback { data, capacity ->
+            val current = linkChannel
+            if (current == null) {
+                0
+            } else {
+                val length = current.onLinkReceive(linkRecvBuffer)
+                if (length <= 0) {
+                    0
+                } else {
+                    val count = minOf(length, capacity, linkRecvBuffer.size)
+                    data.write(0, linkRecvBuffer, 0, count)
+                    count
+                }
+            }
+        }
+        linkSendCallback = send
+        linkRecvCallback = recv
+        function.invokeVoid(
+            arrayOf(
+                CallbackReference.getFunctionPointer(send),
+                CallbackReference.getFunctionPointer(recv),
+            ),
+        )
+        return true
+    }
+
+    override fun removeLink() {
+        linkChannel = null
+        val function = linkFunction ?: return
+        function.invokeVoid(arrayOf<Any>(Pointer.NULL, Pointer.NULL))
+    }
+
+    private val linkSelfTestFunction: Function? = runCatching {
+        nativeLibrary?.getFunction("t6_link_selftest")
+    }.getOrNull()
+
+    override fun linkSelfTest(): Int = linkSelfTestFunction?.invokeInt(emptyArray()) ?: 0
+
     actual fun writeMemory(type: MemoryType, data: ByteArray): Boolean {
         val size = lib.retro_get_memory_size(type.id)
         val pointer = lib.retro_get_memory_data(type.id) ?: return false
@@ -113,6 +205,19 @@ actual class LibretroCore actual constructor(corePath: String, private val front
     }
 
     actual fun loadState(state: ByteArray): Boolean = lib.retro_unserialize(state, state.size.toLong())
+
+    override fun serializeSize(): Long = lib.retro_serialize_size().coerceAtLeast(0)
+
+    override fun saveStateInto(buffer: ByteArray): Int {
+        val size = lib.retro_serialize_size()
+        if (size <= 0 || buffer.size < size) return -1
+        return if (lib.retro_serialize(buffer, size)) size.toInt() else -1
+    }
+
+    override fun loadState(buffer: ByteArray, size: Int): Boolean {
+        if (size <= 0 || size > buffer.size) return false
+        return lib.retro_unserialize(buffer, size.toLong())
+    }
 
     actual override fun close() {
         lib.retro_unload_game()
