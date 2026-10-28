@@ -1,0 +1,83 @@
+name: Bug report
+description: A core that will not load, a crash in native code, a wrong value coming back through the API
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the problem is in the **app** (the window, the AI, the picker), report it on
+        [ai-plays-online](https://github.com/SamurAI-Official/ai-plays-online/issues) instead. Bugs inside a core
+        (DeSmuME, melonDS, mGBA…) belong upstream — but do tell us if we should pin a different build.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you loaded, what you called, what came back (or what crashed).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86-64)
+        - Linux (arm64)
+        - Windows (x86-64)
+        - Android
+        - iOS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: core-source
+    attributes:
+      label: Where did the core come from?
+      options:
+        - The app downloaded it
+        - The pinned build from this repository
+        - A locally built core
+        - Somewhere else (say where)
+    validations:
+      required: true
+
+  - type: input
+    id: core
+    attributes:
+      label: Core and version
+      placeholder: melonDS 0.9.3 / DeSmuME 0.9.12
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The published version, or the commit you built (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log, stack trace, or the JVM crash log
+      description: |
+        A native crash writes `hs_err_pid<number>.log` in the working directory — the "Problematic frame" line is the
+        useful part. Paste it (or attach the file).
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues for this
+          required: true
+        - label: This is not a security issue (see SECURITY.md on the app repository)
+          required: true
